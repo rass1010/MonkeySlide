@@ -1,78 +1,56 @@
 ﻿using BepInEx;
-using System;
-using System.Collections.Generic;
 using System.ComponentModel;
+using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.XR;
 using Utilla;
+using HarmonyLib;
 
 namespace NoFriction
 {
+
     [Description("HauntedModMenu")]
+    [ModdedGamemode]
     [BepInPlugin(PluginInfo.GUID, PluginInfo.Name, PluginInfo.Version)]
     [BepInDependency("org.legoandmars.gorillatag.utilla", "1.5.0")] // Make sure to add Utilla 1.5.0 as a dependency!
-    [ModdedGamemode]
-
     public class Plugin : BaseUnityPlugin
     {
-        public static Plugin Instance;
-        bool inAllowedRoom = false;
-        bool isPressingB = false;
+        public static Plugin Instance { get; private set; }
+
+        public bool inAllowedRoom = false;
+
         bool justPressedB = false;
-        public RaycastHit[] hits;
+        public bool sliding = false;
+
         public List<GorillaSurfaceOverride> gorillaSurfaceOverrides = new List<GorillaSurfaceOverride>();
-        bool fakestart = true;
-        bool hauntedenabled = true;
         public List<int> overrideIndexs = new List<int>();
 
-
-        void Awake()
+        void Start()
         {
-            HarmonyPatches.ApplyHarmonyPatches();
-            Utilla.Events.GameInitialized += GameInitialized;
+            Instance = this;
+            foreach (GorillaSurfaceOverride surfaceOverride in GameObject.Find("Level").GetComponentsInChildren<GorillaSurfaceOverride>())
+            {
+                gorillaSurfaceOverrides.Add(surfaceOverride);
+                overrideIndexs.Add(surfaceOverride.overrideIndex);
+            }
         }
 
         void Update()
         {
-            if (inAllowedRoom && hauntedenabled)
+            if (inAllowedRoom && enabled)
             {
+                bool eitherButtonDown;
 
-                if (fakestart)
-                {
-                    Collider[] gameObjects = GameObject.Find("Level").GetComponentsInChildren<Collider>();
-                    for (int i = 0; i < gameObjects.Length; i++)
-                    {
-                        if (gameObjects[i].transform.gameObject.GetComponent<GorillaSurfaceOverride>())
-                        {
-                            overrideIndexs.Add(gameObjects[i].transform.gameObject.GetComponent<GorillaSurfaceOverride>().overrideIndex);
-                            Destroy(gameObjects[i].transform.gameObject.GetComponent<GorillaSurfaceOverride>());
-                        } else
-                        {
-                            overrideIndexs.Add(8);
-                        }
-                        gorillaSurfaceOverrides.Add(gameObjects[i].transform.gameObject.AddComponent<GorillaSurfaceOverride>());
-                        gorillaSurfaceOverrides[i].overrideIndex = overrideIndexs[i];
-                    }
-                    fakestart = false;
-                }
+                InputDevices.GetDeviceAtXRNode(XRNode.RightHand).TryGetFeatureValue(CommonUsages.primaryButton, out bool isPressingPrimaryButton);
+                InputDevices.GetDeviceAtXRNode(XRNode.RightHand).TryGetFeatureValue(CommonUsages.secondaryButton, out bool isPressingSecondaryButton);
 
-                List<InputDevice> list = new List<InputDevice>();
-                InputDevices.GetDevices(list);
+                eitherButtonDown = isPressingPrimaryButton || isPressingSecondaryButton;
 
-                for (int i = 0; i < list.Count; i++)
-                {
-                    if (list[i].characteristics.HasFlag(InputDeviceCharacteristics.Right))
-                    {
-                        list[i].TryGetFeatureValue(CommonUsages.secondaryButton, out isPressingB);
-                    }
-                }
-
-
-                if (isPressingB)
+                if (eitherButtonDown)
                 {
                     if (!justPressedB)
                     {
-                        startSlide();
+                        SetSlide(true);
                         justPressedB = true;
                     }
                 }
@@ -80,56 +58,64 @@ namespace NoFriction
                 {
                     if (justPressedB)
                     {
-                        stopSlide();
+                        SetSlide(false);
                         justPressedB = false;
                     }
                 }
             }
         }
-        [ModdedGamemodeJoin]
-        public void RoomJoined(string gamemode)
-        {
-            
-            inAllowedRoom = true;
-        }
 
+        [ModdedGamemodeJoin] internal void RoomJoined(string gamemode) => inAllowedRoom = true;
         [ModdedGamemodeLeave]
-        public void RoomLeft(string gamemode)
+        internal void RoomLeft(string gamemode)
         {
-            // The room was left. Disable mod stuff.
             inAllowedRoom = false;
-            stopSlide();
-        }
-        private void GameInitialized(object sender, EventArgs e)
-        {
-            
+
+            // Prevents the player from sliding when you leave a Modded lobby.
+            SetSlide(false);
         }
 
-        void startSlide()
+        internal void SetSlide(bool value)
         {
             for (int i = 0; i < gorillaSurfaceOverrides.Count; i++)
             {
-                gorillaSurfaceOverrides[i].overrideIndex = 61;
+                gorillaSurfaceOverrides[i].overrideIndex = value == true ? 61 : overrideIndexs[i];
             }
-        }
-
-        void stopSlide()
-        {
-            for (int i = 0; i < gorillaSurfaceOverrides.Count; i++)
-            {
-                gorillaSurfaceOverrides[i].overrideIndex = overrideIndexs[i];
-            }
+            sliding = value;
         }
 
         void OnEnable()
         {
-            hauntedenabled = true;
+            HarmonyPatches.ApplyHarmonyPatches();
         }
 
         void OnDisable()
         {
-            hauntedenabled = false;
-            stopSlide();
+            // Prevents the player from sliding when the mod is disabled.
+            HarmonyPatches.RemoveHarmonyPatches();
+
+            if (GorillaLocomotion.Player.Instance != null && sliding)
+            {
+                GorillaLocomotion.Player.Instance.currentMaterialIndex = 0;
+                GorillaLocomotion.Player.Instance.currentOverride.overrideIndex = 0;
+                GorillaLocomotion.Player.Instance.leftHandSurfaceOverride.overrideIndex = 0;
+                GorillaLocomotion.Player.Instance.rightHandSurfaceOverride.overrideIndex = 0;
+            }
+
+            SetSlide(false);    
+        }
+
+        [HarmonyPatch(typeof(GorillaLocomotion.Player))]
+        [HarmonyPatch("GetSlidePercentage", MethodType.Normal)]
+        class slidepatch
+        {
+            static void Postfix(ref float __result)
+            {
+                if (Instance.inAllowedRoom && Instance.sliding)
+                {
+                    __result = 1f;
+                }
+            }
         }
     }
 }
